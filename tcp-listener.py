@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+
+# Minimal Teltonika Codec8 TCP listener.
+# Handles IMEI handshake & Codec8 AVL data packets
+# Parses and prints record to stdout
+
+import socket
+import struct
+import threading
+from datetime import datetime, timezone
+
+HOST = "0.0.0.0"
+PORT = 5027
+
+def parse_codec8(data: bytes):
+    codec_id = data[0]
+    num_data_1 = data[1]
+    offset = 2
+    records = []
+
+    for _ in range(num_data_1):
+        timestamp_ms = struct.unpack(">Q", data[offset:offset + 8])[0]
+        offset += 8
+        priority = data[offset]
+        offset += 1
+
+        # GPS 
+        longitude = struct.unpack(">i", data[offset:offset + 4])[0] / 10_000_000
+        offset += 4
+        latitude = struct.unpack(">i", data[offset:offset + 4])[0] / 10_000_000
+        offset += 4
+        altitude = struct.unpack(">h", data[offset:offset + 2])[0]
+        offset += 2
+        angle = struct.unpack(">H", data[offset:offset + 2])[0]
+        offset += 2
+        satellites = data[offset]
+        offset += 1
+        speed = struct.unpack(">H", data[offset:offset + 2])[0]
+        offset += 2
+
+        event_io_id = data[offset]
+        offset += 1
+        n_total_io = data[offset]
+        offset += 1
+
+        io_values = {}
+        for size, label in ((1, "1b"), (2, "2b"), (4, "4b"), (8, "8b")):
+            n = data[offset]
+            offset += 1
+            for _ in range(n):
+                io_id = data[offset]
+                offset += 1
+                val = int.from_bytes(data[offset:offset + size], "big")
+                offset += size
+                io_values[io_id] = val
+
+        records.append({
+            "timestamp": datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc),
+            "priority": priority,
+            "lat": latitude,
+            "lon": longitude,
+            "altitude": altitude,
+            "angle": angle,
+            "satellites": satellites,
+            "speed": speed,
+            "event_io_id": event_io_id,
+            "io": io_values,
+        })
+
+    num_data_2 = data[offset]
+    return num_data_1, records
+
+def handle_client(conn: socket.socket, addr):
+    print(f"[+] Connection from {addr}")
+    try:
+        imei_len_bytes = conn.recv(2)
+        if len(imei_len_bytes) < 2:
+            conn.close()
+            return
+        imei_len = struct.unpack(">H", imei_len_bytes)[0]
+        imei_bytes = conn.recv(imei_len)
+        imei = imei_bytes.decode("ascii", errors="ignore")
+        print(f"    IMEI: {imei}")
+
+        # TODO: check IMEI against a whitelist of known devices prior to accepting
+        conn.sendall(b"\x01")
+
+        while True:
+            header = conn.recv(4)
+            if len(header) < 4:
+                break
+            preamble = struct.unpack(">I", header)[0]
+            if preamble != 0:
+                break
+
+            length_bytes = conn.recv(4)
+            data_length = struct.unpack(">I", length_bytes)[0]
+
+            data = b""
+            while len(data) < data_length:
+                chunk = conn.recv(data_length - len(data))
+                if not chunk:
+                    break
+                data += chunk
+
+            crc = conn.recv(4)
+
+            num_records, records = parse_codec8(data)
+
+            for r in records:
+                print(f"    [{imei}] {r['timestamp']} lat={r['lat']} lon={r['lon']} "
+                      f"speed={r['speed']}km/h sats={r['satellites']}")
+                # TODO: write to db keyed by imei
+
+            conn.sendall(struct.pack(">I", num_records))
+
+    except Exception as e:
+        print(f"    [!] Error with {addr}: {e}")
+    finally:
+        conn.close()
+        print(f"[-] Disconnected {addr}")
+
+def main():
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind((HOST, PORT))
+    srv.listen(5)
+    print(f"Listening on {HOST}:{PORT}")
+
+    while True:
+        conn, addr = srv.accept()
+        threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
+
+if __name__ == "__main__":
+    main()
