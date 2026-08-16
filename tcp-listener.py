@@ -4,6 +4,7 @@
 # Handles IMEI handshake & Codec8 AVL data packets
 # Parses and prints record to stdout
 
+import json
 import socket
 import struct
 import threading
@@ -70,6 +71,15 @@ def parse_codec8(data: bytes):
     num_data_2 = data[offset]
     return num_data_1, records
 
+def record_to_json(imei: str, record: dict) -> str:
+    payload = {**record, "imei": imei}
+    return json.dumps(payload, default=_json_default)
+
+def _json_default(obj):
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
 def handle_client(conn: socket.socket, addr):
     print(f"[+] Connection from {addr}")
     try:
@@ -108,8 +118,7 @@ def handle_client(conn: socket.socket, addr):
             num_records, records = parse_codec8(data)
 
             for r in records:
-                print(f"    [{imei}] {r['timestamp']} lat={r['lat']} lon={r['lon']} "
-                      f"speed={r['speed']}km/h sats={r['satellites']}")
+                print(record_to_json(imei, r))
                 # TODO: write to db keyed by imei
 
             conn.sendall(struct.pack(">I", num_records))
