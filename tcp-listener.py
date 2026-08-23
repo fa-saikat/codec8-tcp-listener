@@ -13,6 +13,20 @@ from datetime import datetime, timezone
 HOST = "0.0.0.0"
 PORT = 5027
 
+def recv_exact(conn, n):
+    buf = bytearray()
+
+    while len(buf) < n:
+        chunk = conn.recv(n - len(buf))
+        if not chunk:
+            if buf:
+                raise ConnectionError(
+                    f"connection closed mid-message: expected {n} bytes, but got {len(buf)}"
+                )
+            return None
+        buf.extend(chunk)
+    return bytes(buf)
+
 def parse_codec8(data: bytes):
     codec_id = data[0]
     num_data_1 = data[1]
@@ -83,12 +97,16 @@ def _json_default(obj):
 def handle_client(conn: socket.socket, addr):
     print(f"[+] Connection from {addr}")
     try:
-        imei_len_bytes = conn.recv(2)
-        if len(imei_len_bytes) < 2:
+        imei_len_bytes = recv_exact(conn, 2)
+        if imei_len_bytes is None:
             conn.close()
             return
         imei_len = struct.unpack(">H", imei_len_bytes)[0]
-        imei_bytes = conn.recv(imei_len)
+
+        imei_bytes = recv_exact(conn, imei_len)
+        if imei_bytes is None:
+            conn.close()
+            return
         imei = imei_bytes.decode("ascii", errors="ignore")
         print(f"    IMEI: {imei}")
 
@@ -96,24 +114,25 @@ def handle_client(conn: socket.socket, addr):
         conn.sendall(b"\x01")
 
         while True:
-            header = conn.recv(4)
-            if len(header) < 4:
+            header = recv_exact(conn, 4)
+            if header is None:
                 break
             preamble = struct.unpack(">I", header)[0]
             if preamble != 0:
                 break
 
-            length_bytes = conn.recv(4)
+            length_bytes = recv_exact(conn, 4)
+            if length_bytes is None:
+                break
             data_length = struct.unpack(">I", length_bytes)[0]
 
-            data = b""
-            while len(data) < data_length:
-                chunk = conn.recv(data_length - len(data))
-                if not chunk:
-                    break
-                data += chunk
+            data = recv_exact(conn, data_length)
+            if data is None:
+                break
 
-            crc = conn.recv(4)
+            crc = recv_exact(conn, 4 )
+            if crc is None:
+                break
 
             num_records, records = parse_codec8(data)
 
@@ -123,6 +142,8 @@ def handle_client(conn: socket.socket, addr):
 
             conn.sendall(struct.pack(">I", num_records))
 
+    except (ConnectionError, OSError) as e:
+        print(f"    [!] Problem with connection {addr}: {e}")
     except Exception as e:
         print(f"    [!] Error with {addr}: {e}")
     finally:
