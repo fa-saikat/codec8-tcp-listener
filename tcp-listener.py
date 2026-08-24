@@ -94,6 +94,17 @@ def _json_default(obj):
         return obj.isoformat()
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
+def crc16_ibm(data: bytes) -> int:
+    crc = 0x0000
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            if crc & 0x0001:
+                crc = (crc >> 1) ^ 0xA001
+            else:
+                crc >>= 1
+    return crc & 0xFFFF
+
 def handle_client(conn: socket.socket, addr):
     print(f"[+] Connection from {addr}")
     try:
@@ -130,9 +141,19 @@ def handle_client(conn: socket.socket, addr):
             if data is None:
                 break
 
-            crc = recv_exact(conn, 4 )
-            if crc is None:
+            crc_bytes = recv_exact(conn, 4)
+            if crc_bytes is None:
                 break
+            received_crc = struct.unpack(">I", crc_bytes)[0] & 0xFFFF
+
+            computed_crc = crc16_ibm(data)
+            if computed_crc != received_crc:
+                print(f"    [!] [{imei}] CRC mismatch: got {received_crc:#06x}, "
+                      f"computed {computed_crc:#06x} -- discarding packet")
+                # NAK by acking 0 records so the device knows to resend
+                # rather than assuming the corrupted packet was accepted.
+                conn.sendall(struct.pack(">I", 0))
+                continue
 
             num_records, records = parse_codec8(data)
 
